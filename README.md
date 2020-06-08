@@ -7,3 +7,7 @@ This example uses AWS CloudFormation to create an Amazon SageMaker Jupyter Noteb
 
 The Jupyter notebook shows an example of how to use Dask to load netcdf files directly from S3. The mean and standard deviation of the loaded data are then computed to demonstrate how Dask can be used to accelerate computations over large data volumes. Finally, time series are pulled from the loaded data to demonstrate how to select specific locations in a raster field.
 
+
+### Architecture
+
+![architecture](cloudformation/architecture.png)
