@@ -1,4 +1,15 @@
 Parameters:
+  DaskWorkerGitToken:
+    Type: String
+    Description: GitHub OAuth Token for accessing the Dask worker repository
+    MinLength: 40
+    NoEcho: true
+
+  SagemakerCodeRepo:
+    Type: String
+    Description: Github Repository for loading into the Sagemaker Jupyter environment
+    Default: https://github.com/zflamig/dask-era5.git
+
   DaskWorkerGitSourceRepo:
     Type: String
     Description: GitHub Repository for building the container image for the Dask workers
@@ -6,17 +17,13 @@ Parameters:
 
   GitHubUser:
     Type: String
-    Description: GitHub username or organization - leave blank if using CodeCommit
+    Description: GitHub organization for Dask Worker repository
     Default: zflamig
 
   DaskWorkerGitSourceBranch:
     Type: String
     Description: GitHub Repository Branch for Dask workers
     Default: master
-
-  DaskWorkerGitToken:
-    Type: String
-    Description: GitHub OAuth Token
 
   CodeBuildDockerImage:
     Type: String
@@ -175,8 +182,7 @@ Resources:
       - CodePipelineArtifactBucket
 
   # This CodePipeline triggers on a commit to the Git branch passed, builds the Docker image
-  # and then deploys the container in the Fargate Cluster. CodePipeline can support N stages. For
-  # example, you may want to add a stage to test your build and/or container.
+  # and then deploys the container in the Fargate Cluster.
   CodePipelineGitHub:
     Type: AWS::CodePipeline::Pipeline
     Properties:
@@ -564,7 +570,7 @@ Resources:
       ContainerDefinitions:
         - Command:
             - dask-scheduler
-          Cpu: 4096
+          Cpu: 256
           Essential: true
           Image: daskdev/dask:2.9.2
           LogConfiguration: 
@@ -575,16 +581,16 @@ Resources:
               awslogs-stream-prefix: ecs
               awslogs-region:
                 Ref: AWS::Region
-          Memory: 8192
-          MemoryReservation: 8192
+          Memory: 512
+          MemoryReservation: 512
           Name: Worker
-      Cpu: "4096"
+      Cpu: "256"
       ExecutionRoleArn:
         Fn::GetAtt:
           - ECSExecutionRole
           - Arn
       Family: Dask-Scheduler
-      Memory: "8192"
+      Memory: "512"
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
@@ -606,7 +612,7 @@ Resources:
             - --nanny-port
             - '9001'
             - --no-dashboard
-          Cpu: 4096
+          Cpu: 1024
           Essential: true
           Image: daskdev/dask:2.9.2
           LogConfiguration:
@@ -620,7 +626,7 @@ Resources:
           Memory: 8192
           MemoryReservation: 8192
           Name: Worker
-      Cpu: "4096"
+      Cpu: "1024"
       ExecutionRoleArn:
         Fn::GetAtt:
           - ECSExecutionRole
@@ -800,7 +806,7 @@ Resources:
         Fn::GetAtt:
           - SagemakerRole
           - Arn
-      DefaultCodeRepository: https://github.com/zflamig/dask-era5.git
+      DefaultCodeRepository: !Ref SagemakerCodeRepo
       DirectInternetAccess: Enabled
       NotebookInstanceName: DaskNotebook
       LifecycleConfigName:  !GetAtt NotebookLifecycleConfig.NotebookInstanceLifecycleConfigName
