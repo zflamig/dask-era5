@@ -3,6 +3,7 @@ Parameters:
     Type: String
     Description: GitHub OAuth Token for accessing the Dask worker repository
     MinLength: 40
+    AllowedPattern: "[a-zA-Z0-9]+"
     NoEcho: true
 
   SagemakerCodeRepo:
@@ -15,7 +16,7 @@ Parameters:
     Description: GitHub Repository for building the container image for the Dask workers
     Default: dask-worker
 
-  GitHubUser:
+  DaskWorkerGitHubOrg:
     Type: String
     Description: GitHub organization for Dask Worker repository
     Default: zflamig
@@ -38,6 +39,95 @@ Resources:
   CodePipelineArtifactBucket:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
+
+  CleanBucketOnDelete:
+    DependsOn: CleanBucketOnDeleteLambda
+    Type: Custom::CleanBucket
+    Properties:
+      ServiceToken: 
+        Fn::GetAtt: 
+          - "CleanBucketOnDeleteLambda"
+          - "Arn"
+      BucketName: !Ref CodePipelineArtifactBucket
+
+  CleanBucketOnDeleteLambda:
+    DependsOn: CodePipelineArtifactBucket
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: 
+        ZipFile: 
+          !Sub |
+            import json, boto3, logging
+            import cfnresponse
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+    
+            def lambda_handler(event, context):
+                logger.info("event: {}".format(event))
+                try:
+                    bucket = event['ResourceProperties']['BucketName']
+                    logger.info("bucket: {}, event['RequestType']: {}".format(bucket,event['RequestType']))
+                    if event['RequestType'] == 'Delete':
+                        s3 = boto3.resource('s3')
+                        bucket = s3.Bucket(bucket)
+                        for obj in bucket.objects.filter():
+                            logger.info("delete obj: {}".format(obj))
+                            s3.Object(bucket.name, obj.key).delete()
+    
+                    sendResponseCfn(event, context, cfnresponse.SUCCESS)
+                except Exception as e:
+                    logger.info("Exception: {}".format(e))
+                    sendResponseCfn(event, context, cfnresponse.FAILED)
+    
+            def sendResponseCfn(event, context, responseStatus):
+                responseData = {}
+                responseData['Data'] = {}
+                cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")            
+    
+      Handler: "index.lambda_handler"
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 60
+      Role : !GetAtt CleanBucketOnDeleteLambdaRole.Arn
+
+  CleanBucketOnDeleteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Join [ -, [!Ref 'AWS::StackName', 'CleanBucketOnDeleteLambdaPolicy'] ]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:DeleteObject
+            Resource:
+            - !GetAtt CodePipelineArtifactBucket.Arn
+            - !Join
+              - "/"
+              - - !GetAtt CodePipelineArtifactBucket.Arn
+                - "*"
+          - Effect: Deny
+            Action:
+            - s3:DeleteBucket
+            Resource: '*'
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
 
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
@@ -200,7 +290,7 @@ Resources:
                 Version: 1
                 Provider: GitHub
               Configuration:
-                Owner: !Ref GitHubUser
+                Owner: !Ref DaskWorkerGitHubOrg
                 Repo: !Ref DaskWorkerGitSourceRepo
                 Branch: !Ref DaskWorkerGitSourceBranch
                 OAuthToken: !Ref DaskWorkerGitToken
@@ -257,6 +347,87 @@ Resources:
 
   EcrDockerRepository:
     Type: AWS::ECR::Repository
+
+  CleanECROnDelete:
+    DependsOn: CleanECROnDeleteLambda
+    Type: Custom::CleanECR
+    Properties:
+      ServiceToken: 
+        Fn::GetAtt: 
+          - "CleanECROnDeleteLambda"
+          - "Arn"
+      RepositoryName: !Ref EcrDockerRepository
+
+  CleanECROnDeleteLambda:
+    DependsOn: EcrDockerRepository
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: 
+        ZipFile: 
+          !Sub |
+            import json, boto3, logging
+            import cfnresponse
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+    
+            def lambda_handler(event, context):
+                logger.info("event: {}".format(event))
+                try:
+                    repo = event['ResourceProperties']['RepositoryName']
+                    logger.info("bucket: {}, event['RequestType']: {}".format(repo,event['RequestType']))
+                    if event['RequestType'] == 'Delete':
+                        client = boto3.client('ecr')
+                        resp = client.list_images(repositoryName=repo)
+                        images = resp['imageIds']
+                        image_ids = [imageDigest for imageDigest in images]
+                        client.batch_delete_image(repositoryName=repo, imageIds=image_ids)
+    
+                    sendResponseCfn(event, context, cfnresponse.SUCCESS)
+                except Exception as e:
+                    logger.info("Exception: {}".format(e))
+                    sendResponseCfn(event, context, cfnresponse.FAILED)
+    
+            def sendResponseCfn(event, context, responseStatus):
+                responseData = {}
+                responseData['Data'] = {}
+                cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")            
+    
+      Handler: "index.lambda_handler"
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 60
+      Role : !GetAtt CleanECROnDeleteLambdaRole.Arn
+
+  CleanECROnDeleteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Join [ -, [!Ref 'AWS::StackName', 'CleanECROnDeleteLambdaPolicy'] ]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ecr:ListImages
+              - ecr:batchDeleteImage
+            Resource: !GetAtt EcrDockerRepository.Arn
+          - Effect: Allow
+            Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+  
 
   DaskVpc:
     Type: AWS::EC2::VPC
@@ -829,3 +1000,4 @@ Outputs:
         - !Ref 'AWS::Region'
         - '#/notebook-instances/openNotebook/'
         - !GetAtt 'DaskNotebook.NotebookInstanceName'
+        - '?view=lab'
