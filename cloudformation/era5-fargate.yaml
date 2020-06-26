@@ -3,6 +3,7 @@ Parameters:
     Type: String
     Description: GitHub OAuth Token for accessing the Dask worker repository
     MinLength: 40
+    AllowedPattern: "[a-zA-Z0-9]+"
     NoEcho: true
 
   SagemakerCodeRepo:
@@ -15,7 +16,7 @@ Parameters:
     Description: GitHub Repository for building the container image for the Dask workers
     Default: dask-worker
 
-  GitHubUser:
+  DaskWorkerGitHubOrg:
     Type: String
     Description: GitHub organization for Dask Worker repository
     Default: zflamig
@@ -39,6 +40,97 @@ Resources:
     Type: AWS::S3::Bucket
     DeletionPolicy: Delete
 
+  CleanBucketOnDelete:
+    DependsOn:
+      - CleanBucketOnDeleteLambda
+    Type: Custom::CleanBucket
+    Properties:
+      ServiceToken: 
+        Fn::GetAtt: 
+          - "CleanBucketOnDeleteLambda"
+          - "Arn"
+      BucketName: !Ref CodePipelineArtifactBucket
+
+  CleanBucketOnDeleteLambda:
+    DependsOn:
+      - CodePipelineArtifactBucket
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: 
+        ZipFile: 
+          !Sub |
+            import json, boto3, logging
+            import cfnresponse
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+    
+            def lambda_handler(event, context):
+                logger.info("event: {}".format(event))
+                try:
+                    bucket = event['ResourceProperties']['BucketName']
+                    logger.info("bucket: {}, event['RequestType']: {}".format(bucket,event['RequestType']))
+                    if event['RequestType'] == 'Delete':
+                        s3 = boto3.resource('s3')
+                        bucket = s3.Bucket(bucket)
+                        for obj in bucket.objects.filter():
+                            logger.info("delete obj: {}".format(obj))
+                            s3.Object(bucket.name, obj.key).delete()
+    
+                    sendResponseCfn(event, context, cfnresponse.SUCCESS)
+                except Exception as e:
+                    logger.info("Exception: {}".format(e))
+                    sendResponseCfn(event, context, cfnresponse.FAILED)
+    
+            def sendResponseCfn(event, context, responseStatus):
+                responseData = {}
+                responseData['Data'] = {}
+                cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")            
+    
+      Handler: "index.lambda_handler"
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 60
+      Role : !GetAtt CleanBucketOnDeleteLambdaRole.Arn
+
+  CleanBucketOnDeleteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Join [-, [!Ref 'AWS::StackName', 'CleanBucketOnDeleteLambdaPolicy'] ]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - s3:ListBucket
+            - s3:DeleteObject
+            Resource:
+            - !GetAtt CodePipelineArtifactBucket.Arn
+            - !Join
+              - "/"
+              - - !GetAtt CodePipelineArtifactBucket.Arn
+                - "*"
+          - Effect: Deny
+            Action:
+            - s3:DeleteBucket
+            Resource: '*'
+          # - Effect: Allow
+          #   Action:
+          #   - logs:CreateLogGroup
+          #   - logs:CreateLogStream
+          #   - logs:PutLogEvents
+          #   Resource: '*'
+
   CodeBuildServiceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -55,13 +147,15 @@ Resources:
           PolicyDocument:
             Version: 2012-10-17
             Statement:
-              - Resource: "*"
+              - Resource:
+                  Fn::GetAtt:
+                    - CodeBuildLogs
+                    - Arn
                 Effect: Allow
                 Action:
                   - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                  - ecr:GetAuthorizationToken
               - Resource: "*"
                 Effect: Allow
                 Action:
@@ -73,6 +167,7 @@ Resources:
                   - ec2:DescribeSecurityGroups
                   - ec2:DescribeVpcs
                   - ec2:CreateNetworkInterfacePermission
+                  - ecr:GetAuthorizationToken
               - Resource: !Sub arn:aws:s3:::${CodePipelineArtifactBucket}/*
                 Effect: Allow
                 Action:
@@ -90,12 +185,22 @@ Resources:
                   - ecr:UploadLayerPart
                   - ecr:CompleteLayerUpload
 
-  # By default, the build specification is defined in this template, but you can also add buildspec.yml
+  
+  CodeBuildLogs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/codebuild/${AWS::StackName}
+      RetentionInDays: 3
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+
+                  # By default, the build specification is defined in this template, but you can also add buildspec.yml
   # files in your repos to allow for customization.
   # See:
   # https://docs.aws.amazon.com/codebuild/latest/userguide/build-spec-ref.html
   # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codebuild-project-source.html
   CodeBuildProject:
+    DependsOn: CodeBuildLogs
     Type: AWS::CodeBuild::Project
     Properties:
       Artifacts:
@@ -200,7 +305,7 @@ Resources:
                 Version: 1
                 Provider: GitHub
               Configuration:
-                Owner: !Ref GitHubUser
+                Owner: !Ref DaskWorkerGitHubOrg
                 Repo: !Ref DaskWorkerGitSourceRepo
                 Branch: !Ref DaskWorkerGitSourceBranch
                 OAuthToken: !Ref DaskWorkerGitToken
@@ -258,6 +363,87 @@ Resources:
   EcrDockerRepository:
     Type: AWS::ECR::Repository
 
+  CleanECROnDelete:
+    DependsOn:
+      - CleanECROnDeleteLambda
+    Type: Custom::CleanECR
+    Properties:
+      ServiceToken: 
+        Fn::GetAtt: 
+          - "CleanECROnDeleteLambda"
+          - "Arn"
+      RepositoryName: !Ref EcrDockerRepository
+
+  CleanECROnDeleteLambda:
+    DependsOn: EcrDockerRepository
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code: 
+        ZipFile: 
+          !Sub |
+            import json, boto3, logging
+            import cfnresponse
+            logger = logging.getLogger()
+            logger.setLevel(logging.INFO)
+    
+            def lambda_handler(event, context):
+                logger.info("event: {}".format(event))
+                try:
+                    repo = event['ResourceProperties']['RepositoryName']
+                    logger.info("bucket: {}, event['RequestType']: {}".format(repo,event['RequestType']))
+                    if event['RequestType'] == 'Delete':
+                        client = boto3.client('ecr')
+                        resp = client.list_images(repositoryName=repo)
+                        images = resp['imageIds']
+                        image_ids = [imageDigest for imageDigest in images]
+                        client.batch_delete_image(repositoryName=repo, imageIds=image_ids)
+    
+                    sendResponseCfn(event, context, cfnresponse.SUCCESS)
+                except Exception as e:
+                    logger.info("Exception: {}".format(e))
+                    sendResponseCfn(event, context, cfnresponse.FAILED)
+    
+            def sendResponseCfn(event, context, responseStatus):
+                responseData = {}
+                responseData['Data'] = {}
+                cfnresponse.send(event, context, responseStatus, responseData, "CustomResourcePhysicalID")            
+    
+      Handler: "index.lambda_handler"
+      Runtime: python3.7
+      MemorySize: 128
+      Timeout: 60
+      Role : !GetAtt CleanECROnDeleteLambdaRole.Arn
+
+  CleanECROnDeleteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: !Join [ -, [!Ref 'AWS::StackName', 'CleanECROnDeleteLambdaPolicy'] ]
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+              - ecr:ListImages
+              - ecr:batchDeleteImage
+            Resource: !GetAtt EcrDockerRepository.Arn
+          # - Effect: Allow
+          #   Action:
+          #   - logs:CreateLogGroup
+          #   - logs:CreateLogStream
+          #   - logs:PutLogEvents
+          #   Resource: '*'
+
   DaskVpc:
     Type: AWS::EC2::VPC
     Properties:
@@ -279,13 +465,6 @@ Resources:
           - 0
           - Fn::GetAZs: ""
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet1
-        - Key: aws-cdk:subnet-name
-          Value: Public
-        - Key: aws-cdk:subnet-type
-          Value: Public
   PublicSubnet1RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -318,150 +497,6 @@ Resources:
       Tags:
         - Key: Name
           Value: dask-fargate/MyVpc/PublicSubnet1
-  PublicSubnet1NatGateway:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId:
-        Fn::GetAtt:
-          - PublicSubnet1EIP
-          - AllocationId
-      SubnetId:
-        Ref: PublicSubnet1
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet1
-  PublicSubnet2:
-    Type: AWS::EC2::Subnet
-    Properties:
-      CidrBlock: 10.0.64.0/18
-      VpcId:
-        Ref: DaskVpc
-      AvailabilityZone:
-        Fn::Select:
-          - 1
-          - Fn::GetAZs: ""
-      MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet2
-  PublicSubnet2RouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId:
-        Ref: DaskVpc
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet2
-  PublicSubnet2RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId:
-        Ref: PublicSubnet2RouteTable
-      SubnetId:
-        Ref: PublicSubnet2
-  PublicSubnet2DefaultRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Ref: PublicSubnet2RouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId:
-        Ref: InternetGateway
-    DependsOn:
-      - VPCGatewayA
-  PublicSubnet2EIP:
-    Type: AWS::EC2::EIP
-    Properties:
-      Domain: vpc
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet2
-  PublicSubnet2NATGateway:
-    Type: AWS::EC2::NatGateway
-    Properties:
-      AllocationId:
-        Fn::GetAtt:
-          - PublicSubnet2EIP
-          - AllocationId
-      SubnetId:
-        Ref: PublicSubnet2
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PublicSubnet2
-  PrivateSubnet1Subnet:
-    Type: AWS::EC2::Subnet
-    Properties:
-      CidrBlock: 10.0.128.0/18
-      VpcId:
-        Ref: DaskVpc
-      AvailabilityZone:
-        Fn::Select:
-          - 0
-          - Fn::GetAZs: ""
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PrivateSubnet1
-  PrivateSubnet1RouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId:
-        Ref: DaskVpc
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PrivateSubnet1
-  PrivateSubnet1RouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId:
-        Ref: PrivateSubnet1RouteTable
-      SubnetId:
-        Ref: PrivateSubnet1Subnet
-  PrivateSubnet1DefaultRoute:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Ref: PrivateSubnet1RouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId:
-        Ref: PublicSubnet1NatGateway
-  MyVpcPrivateSubnet2Subnet0040C983:
-    Type: AWS::EC2::Subnet
-    Properties:
-      CidrBlock: 10.0.192.0/18
-      VpcId:
-        Ref: DaskVpc
-      AvailabilityZone:
-        Fn::Select:
-          - 1
-          - Fn::GetAZs: ""
-      MapPublicIpOnLaunch: false
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PrivateSubnet2
-  MyVpcPrivateSubnet2RouteTableCEDCEECE:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId:
-        Ref: DaskVpc
-      Tags:
-        - Key: Name
-          Value: dask-fargate/MyVpc/PrivateSubnet2
-  MyVpcPrivateSubnet2RouteTableAssociation86A610DA:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId:
-        Ref: MyVpcPrivateSubnet2RouteTableCEDCEECE
-      SubnetId:
-        Ref: MyVpcPrivateSubnet2Subnet0040C983
-  MyVpcPrivateSubnet2DefaultRoute9CE96294:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Ref: MyVpcPrivateSubnet2RouteTableCEDCEECE
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId:
-        Ref: PublicSubnet2NATGateway
   InternetGateway:
     Type: AWS::EC2::InternetGateway
     Properties:
@@ -475,18 +510,18 @@ Resources:
         Ref: DaskVpc
       InternetGatewayId:
         Ref: InternetGateway
-  LogGroupS:
+  LogGroupScheduler:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: SlogGroup
-      RetentionInDays: 90
+      LogGroupName: !Sub /aws/${AWS::StackName}/dask/scheduler
+      RetentionInDays: 3
     UpdateReplacePolicy: Delete
     DeletionPolicy: Delete
-  LogGroupW:
+  LogGroupWorker:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: WlogGroup
-      RetentionInDays: 90
+      LogGroupName: !Sub /aws/${AWS::StackName}/dask/worker
+      RetentionInDays: 3
     UpdateReplacePolicy: Delete
     DeletionPolicy: Delete
   ECSExecutionRole:
@@ -508,18 +543,7 @@ Resources:
               - ecr:BatchCheckLayerAvailability
               - ecr:GetDownloadUrlForLayer
               - ecr:BatchGetImage
-            Effect: Allow
-            Resource:
-              Fn::Join:
-                - ""
-                - - "arn:"
-                  - Ref: AWS::Partition
-                  - ":ecr:"
-                  - Ref: AWS::Region
-                  - ":"
-                  - Ref: AWS::AccountId
-                  - :repository/aws-cdk/assets
-          - Action: ecr:GetAuthorizationToken
+              - ecr:GetAuthorizationToken
             Effect: Allow
             Resource: "*"
           - Action:
@@ -528,30 +552,18 @@ Resources:
             Effect: Allow
             Resource:
               Fn::GetAtt:
-                - LogGroupS
+                - LogGroupScheduler
+                - Arn
+          - Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::GetAtt:
+                - LogGroupWorker
                 - Arn
         Version: "2012-10-17"
       PolicyName: ECSExecutionRolePolicy
-      Roles:
-        - Ref: ECSExecutionRole
-  ECSExecutionRolePolicy2:
-    Type: AWS::IAM::Policy
-    Properties:
-      PolicyDocument:
-        Statement:
-          - Action:
-              - ecr:BatchCheckLayerAvailability
-              - ecr:GetDownloadUrlForLayer
-              - ecr:BatchGetImage
-              - ecr:GetAuthorizationToken
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              - sagemaker:*
-              - s3:*
-            Effect: Allow
-            Resource: "*"
-        Version: "2012-10-17"
-      PolicyName: ECSExecutionPolicy
       Roles:
         - Ref: ECSExecutionRole
   DaskCluster:
@@ -570,27 +582,27 @@ Resources:
       ContainerDefinitions:
         - Command:
             - dask-scheduler
-          Cpu: 256
+          Cpu: 1024
           Essential: true
           Image: daskdev/dask:2.9.2
           LogConfiguration: 
             LogDriver: awslogs
             Options:
               awslogs-group:
-                Ref: LogGroupS
+                Ref: LogGroupScheduler
               awslogs-stream-prefix: ecs
               awslogs-region:
                 Ref: AWS::Region
-          Memory: 512
-          MemoryReservation: 512
+          Memory: 2048
+          MemoryReservation: 2048
           Name: Worker
-      Cpu: "256"
+      Cpu: "1024"
       ExecutionRoleArn:
         Fn::GetAtt:
           - ECSExecutionRole
           - Arn
       Family: Dask-Scheduler
-      Memory: "512"
+      Memory: "2048"
       NetworkMode: awsvpc
       RequiresCompatibilities:
         - FARGATE
@@ -609,9 +621,10 @@ Resources:
             - '7000MB'
             - --worker-port
             - '9000'
-            - --nanny-port
-            - '9001'
+            - --no-nanny
             - --no-dashboard
+            - --death-timeout
+            - '600'
           Cpu: 1024
           Essential: true
           Image: daskdev/dask:2.9.2
@@ -619,7 +632,7 @@ Resources:
             LogDriver: awslogs
             Options:
               awslogs-group:
-                Ref: LogGroupS
+                Ref: LogGroupWorker
               awslogs-stream-prefix: ecs
               awslogs-region:
                 Ref: AWS::Region
@@ -682,7 +695,6 @@ Resources:
                 - GroupId
           Subnets:
             - Ref: PublicSubnet1
-            - Ref: PublicSubnet2
       ServiceName: Dask-Scheduler
       ServiceRegistries:
         - RegistryArn:
@@ -696,7 +708,7 @@ Resources:
     Properties:
       DnsConfig:
         DnsRecords:
-          - TTL: 60
+          - TTL: 5
             Type: A
         NamespaceId:
           Fn::GetAtt:
@@ -730,34 +742,10 @@ Resources:
                 - GroupId
           Subnets:
             - Ref: PublicSubnet1
-            - Ref: PublicSubnet2
       ServiceName: Dask-Worker
-      ServiceRegistries:
-        - RegistryArn:
-            Fn::GetAtt:
-              - DaskWorkerServiceDiscovery
-              - Arn
       TaskDefinition:
         Ref: WorkerDefinition
-  DaskWorkerServiceDiscovery:
-    Type: AWS::ServiceDiscovery::Service
-    Properties:
-      DnsConfig:
-        DnsRecords:
-          - TTL: 60
-            Type: A
-        NamespaceId:
-          Fn::GetAtt:
-            - DaskClusterPrivateNS
-            - Id
-        RoutingPolicy: MULTIVALUE
-      HealthCheckCustomConfig:
-        FailureThreshold: 10
-      Name: Dask-Worker
-      NamespaceId:
-        Fn::GetAtt:
-          - DaskClusterPrivateNS
-          - Id
+
   SagemakerRole:
     Type: AWS::IAM::Role
     Properties:
@@ -816,7 +804,7 @@ Resources:
             - DaskSecurityGroup
             - GroupId
       SubnetId:
-        Ref: PrivateSubnet1Subnet
+        Ref: PublicSubnet1
       VolumeSizeInGB: 50
 
 Outputs:
@@ -829,3 +817,4 @@ Outputs:
         - !Ref 'AWS::Region'
         - '#/notebook-instances/openNotebook/'
         - !GetAtt 'DaskNotebook.NotebookInstanceName'
+        - '?view=lab'
