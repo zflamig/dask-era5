@@ -41,8 +41,7 @@ Resources:
     DeletionPolicy: Delete
 
   CleanBucketOnDelete:
-    DependsOn:
-      - CleanBucketOnDeleteLambda
+    DependsOn: CleanBucketOnDeleteLambda
     Type: Custom::CleanBucket
     Properties:
       ServiceToken: 
@@ -52,8 +51,7 @@ Resources:
       BucketName: !Ref CodePipelineArtifactBucket
 
   CleanBucketOnDeleteLambda:
-    DependsOn:
-      - CodePipelineArtifactBucket
+    DependsOn: CodePipelineArtifactBucket
     Type: "AWS::Lambda::Function"
     Properties:
       Code: 
@@ -364,8 +362,7 @@ Resources:
     Type: AWS::ECR::Repository
 
   CleanECROnDelete:
-    DependsOn:
-      - CleanECROnDeleteLambda
+    DependsOn: CleanECROnDeleteLambda
     Type: Custom::CleanECR
     Properties:
       ServiceToken: 
