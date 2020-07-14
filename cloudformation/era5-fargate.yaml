@@ -391,9 +391,11 @@ Resources:
                     if event['RequestType'] == 'Delete':
                         client = boto3.client('ecr')
                         resp = client.list_images(repositoryName=repo)
-                        images = resp['imageIds']
-                        image_ids = [imageDigest for imageDigest in images]
-                        client.batch_delete_image(repositoryName=repo, imageIds=image_ids)
+                        if 'imageIds' in resp:
+                          images = resp['imageIds']
+                          image_ids = [imageDigest for imageDigest in images]
+                          if len(image_ids) > 0:
+                            client.batch_delete_image(repositoryName=repo, imageIds=image_ids)
     
                     sendResponseCfn(event, context, cfnresponse.SUCCESS)
                 except Exception as e:
@@ -766,6 +768,7 @@ Resources:
           - Action:
               - s3:*
               - ecs:*
+              - logs:*
             Effect: Allow
             Resource: "*"
         Version: "2012-10-17"
@@ -782,8 +785,9 @@ Resources:
                 #!/bin/sh
 
                 set -e
-                sed -i.bak 's/^#c.NotebookApp.iopub_data_rate_limit.*$/c.NotebookApp.iopub_data_rate_limit = 1.0e10/' ~/.jupyter/jupyter_notebook_config.py
                 sudo -u ec2-user -i <<'EOF'
+
+                sed -i.bak 's/^#c.NotebookApp.iopub_data_rate_limit.*$/c.NotebookApp.iopub_data_rate_limit = 1.0e10/' ~/.jupyter/jupyter_notebook_config.py
 
                 nohup sh -c 'source activate python3 && conda update -n base -c defaults conda -y && conda install -c conda python=3.7.4 basemap proj4 -y && pip install dask==2.19.0 distributed==2.19.0 tornado==6.0.4 cloudpickle==1.4.1 msgpack==0.6.2 blosc==1.8.1 numpy==1.17.3 lz4==3.0.2 netcdf4==1.5.3 xarray==0.14.1 bokeh==2.1.1 s3fs==0.4.2 fsspec==0.7.4 h5netcdf==0.8.0 h5py==2.10.0' >output.log &
 
