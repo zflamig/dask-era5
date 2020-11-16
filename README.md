@@ -7,9 +7,9 @@ The Jupyter notebook shows an example of how to use Dask to load netcdf files di
 
 ### Getting started
 
-[![cloudformation-launch-stack](cloudformation/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/new?stackName=era5&templateURL=hhttps://s3.amazonaws.com/docs.opendata.aws/cloudformation/era5-fargate.yaml)
+[![cloudformation-launch-stack](cloudformation/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/new?stackName=era5&templateURL=https://s3.amazonaws.com/docs.opendata.aws/cloudformation/era5-fargate.yaml)
 
-1. Launch the stack, by default it will be in the `us-east-1` region but you can change it to any region you prefer.
+1. Launch the stack, by default it will be in the `us-east-1` region (since that's where the ERA5 data is) but you can change it to any region you prefer.
 2. On the Parameters page, enter your `DaskWorkerGitToken` which is a GitHub OAuth Token. See below for how to get one if you don't have it. You can leave all the other parameters alone for now.
 3. Hit `next` twice, agree that you know this will create IAM resources.
 4. Wait for the stack to create, and then navigate to the `Outputs` tab for the link to your Jupyter Notebook.
